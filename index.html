@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}</style>
+<title>BTC 5-Min Signal</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap">
+<style>
+/* Layout: one narrow column built for a phone. A dominant signal panel on top, a three-figure accuracy strip, then the log of finished windows and settings. */
+:root {
+  --bg: #f1f4f7;
+  --surface: #ffffff;
+  --fg: #12171c;
+  --muted: #55616d;
+  --line: #d9dfe5;
+  --accent: #1f4fcf;
+  --accent-fg: #ffffff;
+  --up: #0c7a45;
+  --up-bg: #e1f3e9;
+  --down: #b8301f;
+  --down-bg: #fae6e2;
+  --flat: #5b6672;
+  --flat-bg: #e9edf1;
+  --font-display: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1217;
+    --surface: #161c22;
+    --fg: #e7ebef;
+    --muted: #93a0ac;
+    --line: #27303a;
+    --accent: #7fa3ff;
+    --accent-fg: #0d1217;
+    --up: #4fd18b;
+    --up-bg: #0f2a1d;
+    --down: #ff8173;
+    --down-bg: #341a17;
+    --flat: #9aa6b2;
+    --flat-bg: #1e252c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1217;
+  --surface: #161c22;
+  --fg: #e7ebef;
+  --muted: #93a0ac;
+  --line: #27303a;
+  --accent: #7fa3ff;
+  --accent-fg: #0d1217;
+  --up: #4fd18b;
+  --up-bg: #0f2a1d;
+  --down: #ff8173;
+  --down-bg: #341a17;
+  --flat: #9aa6b2;
+  --flat-bg: #1e252c;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.45;
+  padding-block: 18px 36px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 480px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { font-family: var(--font-display); font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+h2 { font-family: var(--font-display); font-size: 15px; font-weight: 700; margin: 0 0 10px; }
+.src { font-size: 12px; color: var(--muted); }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.panel.up { background: var(--up-bg); }
+.panel.down { background: var(--down-bg); }
+.win { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sig { font-family: var(--font-display); font-weight: 700; font-size: 58px; line-height: 1; letter-spacing: -0.02em; color: var(--flat); }
+.up .sig { color: var(--up); }
+.down .sig { color: var(--down); }
+.conf { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.fair { font-size: 13px; color: var(--muted); max-width: 52ch; }
+.prices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+.prices div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.k { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.v { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.res { font-size: 14px; font-weight: 600; min-height: 1.4em; }
+.count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.btn { font: inherit; font-weight: 600; min-height: 50px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); padding: 0 16px; cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-size: 16px; }
+.btn:disabled { opacity: 0.6; cursor: default; }
+.btn:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.stat { padding: 12px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat .big { font-family: var(--font-display); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .sub { font-size: 12px; color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+.log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.log li { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; font-variant-numeric: tabular-nums; }
+.log li:first-child { border-top: 0; }
+.log li.empty { display: block; color: var(--muted); font-size: 13px; }
+.pill { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--flat-bg); color: var(--flat); }
+.pill.win { background: var(--up-bg); color: var(--up); }
+.pill.loss { background: var(--down-bg); color: var(--down); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 6px 0; }
+.row label { font-size: 14px; }
+select { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-height: 40px; }
+.note { font-size: 12px; color: var(--muted); margin: 0; max-width: 60ch; }
+.err { color: var(--down); font-size: 13px; margin: 0; }
+.bar { height: 6px; border-radius: 3px; background: var(--flat-bg); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+</style>
+
+<main class="wrap">
+  <header class="top">
+    <h1>BTC 5-Min Signal</h1>
+    <span class="src" id="src">Not started</span>
+  </header>
+
+  <section class="panel flat" id="panel" aria-live="polite">
+    <div class="win" id="winLabel">Press Start to begin</div>
+    <div class="sig" id="sig">&mdash;</div>
+    <div class="conf" id="conf"></div>
+    <div class="fair" id="fair">A signal appears a couple of minutes into each 5-minute window, and the bot learns from every result.</div>
+    <div class="prices">
+      <div><span class="k">Window open</span><span class="v" id="pOpen">&mdash;</span></div>
+      <div><span class="k">At signal</span><span class="v" id="pNow">&mdash;</span></div>
+      <div><span class="k">Move</span><span class="v" id="pChg">&mdash;</span></div>
+    </div>
+    <div class="res" id="res"></div>
+    <div class="count" id="count"></div>
+  </section>
+
+  <div id="loadBox" hidden>
+    <div class="bar" aria-hidden="true"><i id="barFill"></i></div>
+  </div>
+  <p class="err" id="err" hidden></p>
+  <button class="btn primary" id="startBtn" type="button">Start</button>
+
+  <section class="stats" aria-label="Accuracy">
+    <div class="stat"><span class="k">Last 100</span><span class="big" id="sAcc">&mdash;</span><span class="sub">all windows</span></div>
+    <div class="stat"><span class="k">On calls</span><span class="big" id="sCall">&mdash;</span><span class="sub" id="sCallN">0 calls</span></div>
+    <div class="stat"><span class="k">Learned</span><span class="big" id="sN">0</span><span class="sub">windows</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Recent windows</h2>
+    <ol class="log" id="log"></ol>
+  </section>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <div class="row">
+      <label for="selMin">Signal comes</label>
+      <select id="selMin">
+        <option value="1">1 min into the window</option>
+        <option value="2" selected>2 min into the window</option>
+        <option value="3">3 min into the window</option>
+        <option value="4">4 min into the window</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="selConf">Only call a side at</label>
+      <select id="selConf">
+        <option value="0.52">52% or more</option>
+        <option value="0.55" selected>55% or more</option>
+        <option value="0.58">58% or more</option>
+        <option value="0.62">62% or more</option>
+      </select>
+    </div>
+    <div class="row">
+      <span class="note" id="btNote">Changing the signal time retrains from recent history.</span>
+      <button class="btn" id="resetBtn" type="button">Reset learning</button>
+    </div>
+  </section>
+
+  <p class="note" id="wakeNote">Keep this page open and the screen on. Locking the phone pauses the bot, and it catches up when you return. Signals are advice only and no trades are placed. Not financial advice.</p>
+</main>
+
+<script>
+// ==CORE==
+const WINDOW = 300, NFEAT = 9, LR = 0.01, L2 = 1e-3;
+const clip = (v, l) => Math.max(-l, Math.min(l, v));
+const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+const std = a => { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) * (v - m), 0) / a.length); };
+
+// c: Map of minute-start (unix seconds) -> [open, high, low, close, volume]
+function features(c, W, m) {
+  const tEnd = W + m * 60;
+  if (!c.has(W)) return null;
+  for (let t = tEnd - 1800; t < tEnd; t += 60) if (!c.has(t)) return null;
+  const closes = [], opens = [], vols = [];
+  for (let t = tEnd - 3600; t < tEnd; t += 60) {
+    const k = c.get(t);
+    if (k) { opens.push(k[0]); closes.push(k[3]); vols.push(k[4]); }
+  }
+  const n = closes.length;
+  const rets = [];
+  for (let i = 1; i < n; i++) rets.push(Math.log(closes[i] / closes[i - 1]));
+  const s = Math.max(std(rets.slice(-30)), 1e-5);
+  const cur = closes[n - 1];
+  const zWin = Math.log(cur / c.get(W)[0]) / (s * Math.sqrt(m));
+  const mom1 = rets[rets.length - 1] / s;
+  const mom3 = Math.log(cur / closes[n - 4]) / (s * Math.sqrt(3));
+  const mom15 = Math.log(cur / closes[n - 16]) / (s * Math.sqrt(15));
+  const s5 = Math.max(std(rets.slice(-5)), 1e-6);
+  const sAll = Math.max(std(rets), 1e-6);
+  const volRatio = Math.log(s5 / sAll);
+  const v3 = Math.max(mean(vols.slice(-3)), 1e-9);
+  const volSurge = Math.log(v3 / Math.max(mean(vols), 1e-9));
+  const L = Math.min(10, n);
+  let g = 0;
+  for (let i = n - L; i < n; i++) if (closes[i] > opens[i]) g++;
+  const green = (g / L - 0.5) * 4;
+  const d = new Date(tEnd * 1000);
+  const h = (d.getUTCHours() + d.getUTCMinutes() / 60) / 24 * 2 * Math.PI;
+  return [clip(zWin, 4), clip(mom1, 4), clip(mom3, 4), clip(mom15, 4),
+          clip(volRatio, 3), clip(volSurge, 3), green, Math.sin(h), Math.cos(h)];
+}
+
+// 1 if the window closed at or above its open (Polymarket "Up"), 0 if below, null if data is missing
+function label(c, W) {
+  if (!c.has(W) || !c.has(W + 240)) return null;
+  return c.get(W + 240)[3] >= c.get(W)[0] ? 1 : 0;
+}
+
+class Model {
+  constructor(minute) {
+    this.minute = minute;
+    this.w = new Array(NFEAT).fill(0);
+    this.b = 0;
+    this.n = 0;
+    this.hist = [];
+    this.backfilled = false;
+  }
+  predict(x) {
+    let z = this.b;
+    for (let i = 0; i < NFEAT; i++) z += this.w[i] * x[i];
+    z = Math.max(-30, Math.min(30, z));
+    return 1 / (1 + Math.exp(-z));
+  }
+  update(x, y) {
+    const g = this.predict(x) - y;
+    for (let i = 0; i < NFEAT; i++) this.w[i] -= LR * (g * x[i] + L2 * this.w[i]);
+    this.b -= LR * g;
+    this.n++;
+  }
+  record(correct, called) {
+    this.hist.push([correct ? 1 : 0, called ? 1 : 0]);
+    if (this.hist.length > 1000) this.hist = this.hist.slice(-1000);
+  }
+}
+
+function stats(hist, last) {
+  const h = last ? hist.slice(-last) : hist;
+  if (!h.length) return { acc: null, nCalled: 0, accCalled: null };
+  const acc = h.reduce((s, r) => s + r[0], 0) / h.length;
+  const cl = h.filter(r => r[1]);
+  return { acc, nCalled: cl.length, accCalled: cl.length ? cl.reduce((s, r) => s + r[0], 0) / cl.length : null };
+}
+
+// Predict each past window before learning from it, so the score is honest.
+function walkForward(model, c, start, end, m, minConf) {
+  const out = [];
+  for (let W = start; W < end; W += WINDOW) {
+    const x = features(c, W, m), y = label(c, W);
+    if (!x || y === null) continue;
+    const p = model.predict(x), conf = Math.max(p, 1 - p);
+    out.push([((p >= 0.5) === (y === 1)) ? 1 : 0, conf >= minConf ? 1 : 0]);
+    model.update(x, y);
+  }
+  return out;
+}
+// ==/CORE==
+
+// ---------- data ----------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const iso = t => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+let source = 'Coinbase';
+
+async function getJSON(url) {
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } catch (e) { last = e; await sleep(800 * (i + 1)); }
+  }
+  throw last;
+}
+async function coinbaseCandles(start, end, onProg) {
+  const out = new Map();
+  let t = start - start % 60;
+  while (t < end) {
+    const t2 = Math.min(t + 300 * 60, end);
+    const rows = await getJSON('https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start=' + iso(t) + '&end=' + iso(t2));
+    for (const r of rows) out.set(r[0], [+r[3], +r[2], +r[1], +r[4], +r[5]]);
+    t = t2;
+    if (onProg) onProg((t - start) / (end - start));
+    await sleep(120);
+  }
+  return out;
+}
+async function krakenCandles(start) {
+  const j = await getJSON('https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1&since=' + (start - 60));
+  const key = Object.keys(j.result).find(k => k !== 'last');
+  const out = new Map();
+  for (const r of j.result[key]) out.set(+r[0], [+r[1], +r[2], +r[3], +r[4], +r[6]]);
+  return out;
+}
+async function getCandles(start, end, onProg) {
+  try {
+    const c = await coinbaseCandles(start, end, onProg);
+    source = 'Coinbase';
+    return c;
+  } catch (e) {
+    const c = await krakenCandles(start);
+    source = 'Kraken';
+    return c;
+  }
+}
+
+// ---------- state ----------
+const $ = id => document.getElementById(id);
+const LS = 'btc5sig.v1';
+let cfg = { m: 2, minConf: 0.55 };
+let model = null, recent = [], pending = null, running = false, busy = false;
+let lastSigW = 0, sigRetryAt = 0, wake = null, timer = null, resetArm = 0;
+
+function loadSaved() {
+  try {
+    const d = JSON.parse(localStorage.getItem(LS) || 'null');
+    if (!d) return;
+    if (d.cfg) cfg = Object.assign(cfg, d.cfg);
+    recent = Array.isArray(d.recent) ? d.recent : [];
+    if (d.model && d.model.minute === cfg.m && d.model.w && d.model.w.length === NFEAT) {
+      model = Object.assign(new Model(cfg.m), d.model);
+    }
+  } catch (e) { /* storage unavailable: start fresh */ }
+}
+function save() {
+  try { localStorage.setItem(LS, JSON.stringify({ cfg: cfg, recent: recent.slice(-30), model: model })); } catch (e) { /* ignore */ }
+}
+
+// ---------- display ----------
+const pct = v => v === null ? '—' : (v * 100).toFixed(0) + '%';
+const money = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const tl = W => new Date(W * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const mmss = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+
+function setPanel(cls) { $('panel').className = 'panel ' + cls; }
+function setSrc(t) { $('src').textContent = t; }
+
+function showSignal(p) {
+  $('winLabel').textContent = 'Window ' + tl(p.W) + ' – ' + tl(p.W + WINDOW);
+  $('pOpen').textContent = money(p.open);
+  $('pNow').textContent = money(p.cur);
+  const chg = (p.cur / p.open - 1) * 100;
+  $('pChg').textContent = (chg >= 0 ? '+' : '') + chg.toFixed(3) + '%';
+  $('res').textContent = '';
+  const c = Math.round(p.conf * 100);
+  if (p.called) {
+    setPanel(p.side === 'UP' ? 'up' : 'down');
+    $('sig').textContent = (p.side === 'UP' ? '▲ ' : '▼ ') + p.side;
+    $('conf').textContent = 'Confidence ' + c + '%';
+    $('fair').textContent = 'Fair price for ' + p.side + ' is ' + c + '¢. Only worth taking if Polymarket sells ' + p.side + ' for clearly less, after fees.';
+  } else {
+    setPanel('flat');
+    $('sig').textContent = 'NO CALL';
+    $('conf').textContent = 'Leans ' + p.side + ' ' + c + '%';
+    $('fair').textContent = 'Too close to 50/50 to call. Skip this window.';
+  }
+}
+function showResult(p, y, correct) {
+  const outcome = y === 1 ? 'UP' : 'DOWN';
+  $('res').textContent = p.called
+    ? 'Result: ' + outcome + ' — ' + (correct ? 'call was right' : 'call was wrong')
+    : 'Result: ' + outcome + ' (no call made)';
+}
+function renderCountdown() {
+  if (!running) { $('count').textContent = ''; return; }
+  const now = Date.now() / 1000, W = Math.floor(now / WINDOW) * WINDOW;
+  if (pending && now < pending.W + WINDOW + 5) {
+    $('count').textContent = 'Result in ' + mmss(pending.W + WINDOW - now);
+    return;
+  }
+  if (pending) { $('count').textContent = 'Checking the result…'; return; }
+  let next = W + cfg.m * 60 + 3;
+  if (now >= next - 0.5 && lastSigW === W) next = W + WINDOW + cfg.m * 60 + 3;
+  else if (now >= next + 42) next = W + WINDOW + cfg.m * 60 + 3;
+  $('count').textContent = 'Next signal in ' + mmss(next - now);
+}
+function renderStats() {
+  const st = model ? stats(model.hist, 100) : { acc: null, nCalled: 0, accCalled: null };
+  $('sAcc').textContent = pct(st.acc);
+  $('sCall').textContent = pct(st.accCalled);
+  $('sCallN').textContent = st.nCalled + (st.nCalled === 1 ? ' call' : ' calls');
+  $('sN').textContent = model ? model.n : 0;
+}
+function renderLog() {
+  const ol = $('log');
+  ol.textContent = '';
+  const rows = recent.slice(-12).reverse();
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'Results appear here after each 5-minute window finishes.';
+    ol.appendChild(li);
+    return;
+  }
+  for (const r of rows) {
+    const li = document.createElement('li');
+    const a = document.createElement('span');
+    a.textContent = tl(r.W);
+    const b = document.createElement('span');
+    b.textContent = (r.called ? 'Called ' + r.lean : 'No call') + ' → ' + r.outcome;
+    const pill = document.createElement('span');
+    pill.className = 'pill' + (r.called ? (r.correct ? ' win' : ' loss') : '');
+    pill.textContent = r.called ? (r.correct ? 'Win' : 'Loss') : '—';
+    li.append(a, b, pill);
+    ol.appendChild(li);
+  }
+}
+function render() { renderStats(); renderLog(); renderCountdown(); }
+function showErr(t) { const e = $('err'); e.textContent = t || ''; e.hidden = !t; }
+function setProgress(f) { $('barFill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; }
+
+// ---------- learning loop ----------
+async function backfill(days) {
+  const end = Math.floor(Date.now() / 1000 / WINDOW) * WINDOW, start = end - days * 86400;
+  $('loadBox').hidden = false;
+  $('winLabel').textContent = 'Learning from the last ' + days + ' days…';
+  setProgress(0);
+  const c = await getCandles(start - 3600, end, setProgress);
+  const hist = walkForward(model, c, start, end, cfg.m, cfg.minConf);
+  model.hist = hist.slice(-1000);
+  model.backfilled = true;
+  $('loadBox').hidden = true;
+  const st = stats(hist);
+  $('btNote').textContent = hist.length
+    ? 'Tested on ' + hist.length + ' past windows: ' + pct(st.acc) + ' right overall, ' + pct(st.accCalled) + ' on confident calls. Past accuracy is not a profit guarantee.'
+    : 'Not enough history was available to test.';
+  save();
+}
+
+async function signal(W) {
+  const now = Date.now() / 1000;
+  const c = await getCandles(W - 3700, W + cfg.m * 60);
+  const x = features(c, W, cfg.m);
+  if (!x) { sigRetryAt = now + 6; return; }
+  const p = model.predict(x), conf = Math.max(p, 1 - p);
+  pending = {
+    W: W, x: x, p: p, conf: conf, side: p >= 0.5 ? 'UP' : 'DOWN', called: conf >= cfg.minConf,
+    open: c.get(W)[0], cur: c.get(W + cfg.m * 60 - 60)[3], next: 0, tries: 0
+  };
+  lastSigW = W;
+  showSignal(pending);
+  setSrc('Data: ' + source);
+}
+
+async function resolve() {
+  const p = pending;
+  const c = await getCandles(p.W - 60, p.W + WINDOW);
+  const y = label(c, p.W);
+  if (y === null) {
+    p.tries++;
+    if (p.tries >= 6) { pending = null; $('res').textContent = 'Could not confirm the result for this window.'; return; }
+    p.next = Date.now() / 1000 + 5;
+    return;
+  }
+  const correct = (p.p >= 0.5) === (y === 1);
+  model.update(p.x, y);
+  model.record(correct, p.called);
+  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct });
+  showResult(p, y, correct);
+  pending = null;
+  save();
+  render();
+}
+
+async function tick() {
+  if (!running || busy) return;
+  busy = true;
+  try {
+    const now = Date.now() / 1000, W = Math.floor(now / WINDOW) * WINDOW;
+    if (pending) {
+      if (now >= pending.W + WINDOW + 5 && now >= pending.next) await resolve();
+    } else if (lastSigW !== W && now >= W + cfg.m * 60 + 3 && now < W + cfg.m * 60 + 45 && now >= sigRetryAt) {
+      await signal(W);
+    }
+  } catch (e) {
+    setSrc('Connection issue, retrying');
+    sigRetryAt = Date.now() / 1000 + 6;
+    if (pending) pending.next = Date.now() / 1000 + 8;
+  } finally {
+    busy = false;
+    renderCountdown();
+  }
+}
+
+// ---------- controls ----------
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator) {
+      wake = await navigator.wakeLock.request('screen');
+      wake.addEventListener('release', () => { wake = null; });
+      $('wakeNote').textContent = 'Screen stays on while this page is open and visible. Signals are advice only and no trades are placed. Not financial advice.';
+    }
+  } catch (e) { wake = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running && !wake) keepAwake();
+  if (document.visibilityState === 'visible') tick();
+});
+
+async function start() {
+  const btn = $('startBtn');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  showErr('');
+  keepAwake();
+  try {
+    if (!model || !model.backfilled) {
+      model = new Model(cfg.m);
+      await backfill(3);
+    }
+    running = true;
+    btn.hidden = true;
+    setSrc('Data: ' + source);
+    $('winLabel').textContent = 'Waiting for the next signal';
+    render();
+    if (timer) clearInterval(timer);
+    timer = setInterval(tick, 1000);
+    tick();
+  } catch (e) {
+    $('loadBox').hidden = true;
+    $('winLabel').textContent = 'Could not load price data';
+    showErr('Price data could not be loaded from Coinbase or Kraken. Check your connection and tap Retry.');
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+  }
+}
+
+async function relearn() {
+  pending = null;
+  lastSigW = 0;
+  model = new Model(cfg.m);
+  save();
+  render();
+  if (running) {
+    busy = true;
+    try { await backfill(3); } catch (e) { showErr('Could not reload history. Reset again to retry.'); }
+    busy = false;
+    $('winLabel').textContent = 'Waiting for the next signal';
+    setPanel('flat');
+    $('sig').textContent = '—';
+    $('conf').textContent = '';
+    $('res').textContent = '';
+    render();
+  }
+}
+
+$('startBtn').addEventListener('click', start);
+$('selMin').addEventListener('change', e => { cfg.m = +e.target.value; save(); relearn(); });
+$('selConf').addEventListener('change', e => { cfg.minConf = +e.target.value; save(); });
+$('resetBtn').addEventListener('click', () => {
+  const btn = $('resetBtn');
+  if (Date.now() < resetArm) {
+    resetArm = 0;
+    btn.textContent = 'Reset learning';
+    recent = [];
+    relearn();
+    return;
+  }
+  resetArm = Date.now() + 4000;
+  btn.textContent = 'Tap again to confirm';
+  setTimeout(() => { if (Date.now() >= resetArm) { resetArm = 0; btn.textContent = 'Reset learning'; } }, 4100);
+});
+
+loadSaved();
+$('selMin').value = String(cfg.m);
+$('selConf').value = String(cfg.minConf);
+if (model && model.backfilled) $('btNote').textContent = 'Picked up where you left off. Changing the signal time retrains from recent history.';
+render();
+</script>
+
+</html>
