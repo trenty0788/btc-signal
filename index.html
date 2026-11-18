@@ -148,6 +148,8 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
     <div class="stat"><span class="k">Learned</span><span class="big" id="sN">0</span><span class="sub">windows</span></div>
   </section>
 
+  <p class="note" id="pnl"></p>
+
   <section class="card">
     <h2>Recent windows</h2>
     <ol class="log" id="log"></ol>
@@ -171,6 +173,14 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
         <option value="0.55" selected>55% or more</option>
         <option value="0.58">58% or more</option>
         <option value="0.62">62% or more</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="selDays">History to learn from</label>
+      <select id="selDays">
+        <option value="3">3 days (fast)</option>
+        <option value="7">7 days</option>
+        <option value="14">14 days (slower start)</option>
       </select>
     </div>
     <div class="row">
@@ -329,7 +339,7 @@ async function getCandles(start, end, onProg) {
 // ---------- state ----------
 const $ = id => document.getElementById(id);
 const LS = 'btc5sig.v1';
-let cfg = { m: 2, minConf: 0.55 };
+let cfg = { m: 2, minConf: 0.55, days: 3 };
 let model = null, recent = [], pending = null, running = false, busy = false;
 let lastSigW = 0, sigRetryAt = 0, wake = null, timer = null, resetArm = 0;
 
@@ -370,6 +380,10 @@ function showSignal(p) {
     $('sig').textContent = (p.side === 'UP' ? '▲ ' : '▼ ') + p.side;
     $('conf').textContent = 'Confidence ' + c + '%';
     $('fair').textContent = 'Fair price for ' + p.side + ' is ' + c + '¢. Only worth taking if Polymarket sells ' + p.side + ' for clearly less, after fees.';
+    if (p.mkt != null) {
+      const sp = Math.round((p.side === 'UP' ? p.mkt : 1 - p.mkt) * 100), edge = c - sp;
+      $('fair').textContent = 'Polymarket sells ' + p.side + ' at about ' + sp + '¢. Bot fair price is ' + c + '¢, an edge of ' + (edge >= 0 ? '+' : '') + edge + '¢ before fees. ' + (edge >= 3 ? 'Possible value.' : 'Not enough edge, skip.');
+    }
   } else {
     setPanel('flat');
     $('sig').textContent = 'NO CALL';
@@ -427,7 +441,14 @@ function renderLog() {
     ol.appendChild(li);
   }
 }
-function render() { renderStats(); renderLog(); renderCountdown(); }
+function renderPnl() {
+  const rows = recent.filter(r => r.called && r.price != null);
+  const el = $('pnl');
+  if (!rows.length) { el.textContent = 'Polymarket odds not recorded yet. Once they load, this shows what the calls would have earned at those prices.'; return; }
+  const cents = rows.reduce((s, r) => s + (r.correct ? 1 - r.price : -r.price), 0) * 100;
+  el.textContent = 'At Polymarket’s prices, buying 1 share on each of the last ' + rows.length + ' calls would have made ' + (cents >= 0 ? '+' : '') + cents.toFixed(0) + '¢ before fees. Small samples swing a lot.';
+}
+function render() { renderStats(); renderLog(); renderPnl(); renderCountdown(); }
 function showErr(t) { const e = $('err'); e.textContent = t || ''; e.hidden = !t; }
 function setProgress(f) { $('barFill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; }
 
@@ -457,11 +478,33 @@ async function signal(W) {
   const p = model.predict(x), conf = Math.max(p, 1 - p);
   pending = {
     W: W, x: x, p: p, conf: conf, side: p >= 0.5 ? 'UP' : 'DOWN', called: conf >= cfg.minConf,
-    open: c.get(W)[0], cur: c.get(W + cfg.m * 60 - 60)[3], next: 0, tries: 0
+    open: c.get(W)[0], cur: c.get(W + cfg.m * 60 - 60)[3], next: 0, tries: 0, mkt: null
   };
   lastSigW = W;
   showSignal(pending);
   setSrc('Data: ' + source);
+  const cur = pending;
+  const odds = await getOdds(W);
+  if (odds !== null && pending === cur) { cur.mkt = odds; showSignal(cur); }
+}
+
+// Polymarket's displayed Up price for this window's market. Returns null if unavailable (blocked region, not found, network).
+async function getOdds(W) {
+  try {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 6000);
+    const r = await fetch('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-' + W, { signal: ctl.signal, cache: 'no-store' });
+    clearTimeout(to);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const mk = j && j[0] && j[0].markets && j[0].markets[0];
+    if (!mk) return null;
+    const outs = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : mk.outcomes;
+    const pr = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
+    const i = outs.findIndex(o => String(o).toLowerCase() === 'up');
+    const v = parseFloat(pr[i]);
+    return v > 0 && v < 1 ? v : null;
+  } catch (e) { return null; }
 }
 
 async function resolve() {
@@ -477,7 +520,7 @@ async function resolve() {
   const correct = (p.p >= 0.5) === (y === 1);
   model.update(p.x, y);
   model.record(correct, p.called);
-  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct });
+  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct, price: p.mkt == null ? null : (p.side === 'UP' ? p.mkt : 1 - p.mkt) });
   showResult(p, y, correct);
   pending = null;
   save();
@@ -528,7 +571,7 @@ async function start() {
   try {
     if (!model || !model.backfilled) {
       model = new Model(cfg.m);
-      await backfill(3);
+      await backfill(cfg.days);
     }
     running = true;
     btn.hidden = true;
@@ -555,7 +598,7 @@ async function relearn() {
   render();
   if (running) {
     busy = true;
-    try { await backfill(3); } catch (e) { showErr('Could not reload history. Reset again to retry.'); }
+    try { await backfill(cfg.days); } catch (e) { showErr('Could not reload history. Reset again to retry.'); }
     busy = false;
     $('winLabel').textContent = 'Waiting for the next signal';
     setPanel('flat');
@@ -569,6 +612,7 @@ async function relearn() {
 $('startBtn').addEventListener('click', start);
 $('selMin').addEventListener('change', e => { cfg.m = +e.target.value; save(); relearn(); });
 $('selConf').addEventListener('change', e => { cfg.minConf = +e.target.value; save(); });
+$('selDays').addEventListener('change', e => { cfg.days = +e.target.value; save(); relearn(); });
 $('resetBtn').addEventListener('click', () => {
   const btn = $('resetBtn');
   if (Date.now() < resetArm) {
@@ -586,6 +630,7 @@ $('resetBtn').addEventListener('click', () => {
 loadSaved();
 $('selMin').value = String(cfg.m);
 $('selConf').value = String(cfg.minConf);
+$('selDays').value = String(cfg.days);
 if (model && model.backfilled) $('btNote').textContent = 'Picked up where you left off. Changing the signal time retrains from recent history.';
 render();
 </script>
