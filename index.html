@@ -349,13 +349,15 @@ function loadSaved() {
     if (!d) return;
     if (d.cfg) cfg = Object.assign(cfg, d.cfg);
     recent = Array.isArray(d.recent) ? d.recent : [];
+    // Prices saved by the earlier version came from a stale feed, so drop them.
+    if (d.oddsV !== 2) recent.forEach(r => { r.price = null; });
     if (d.model && d.model.minute === cfg.m && d.model.w && d.model.w.length === NFEAT) {
       model = Object.assign(new Model(cfg.m), d.model);
     }
   } catch (e) { /* storage unavailable: start fresh */ }
 }
 function save() {
-  try { localStorage.setItem(LS, JSON.stringify({ cfg: cfg, recent: recent.slice(-30), model: model })); } catch (e) { /* ignore */ }
+  try { localStorage.setItem(LS, JSON.stringify({ oddsV: 2, cfg: cfg, recent: recent.slice(-30), model: model })); } catch (e) { /* ignore */ }
 }
 
 // ---------- display ----------
@@ -366,6 +368,13 @@ const mmss = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + '
 
 function setPanel(cls) { $('panel').className = 'panel ' + cls; }
 function setSrc(t) { $('src').textContent = t; }
+
+// Price you would pay now for the side the bot called, or null if unknown.
+function sideAskOf(p) {
+  if (!p.mkt) return null;
+  const v = p.side === 'UP' ? p.mkt.up : p.mkt.down;
+  return typeof v === 'number' ? v : null;
+}
 
 function showSignal(p) {
   $('winLabel').textContent = 'Window ' + tl(p.W) + ' – ' + tl(p.W + WINDOW);
@@ -380,9 +389,12 @@ function showSignal(p) {
     $('sig').textContent = (p.side === 'UP' ? '▲ ' : '▼ ') + p.side;
     $('conf').textContent = 'Confidence ' + c + '%';
     $('fair').textContent = 'Fair price for ' + p.side + ' is ' + c + '¢. Only worth taking if Polymarket sells ' + p.side + ' for clearly less, after fees.';
-    if (p.mkt != null) {
-      const sp = Math.round((p.side === 'UP' ? p.mkt : 1 - p.mkt) * 100), edge = c - sp;
-      $('fair').textContent = 'Polymarket sells ' + p.side + ' at about ' + sp + '¢. Bot fair price is ' + c + '¢, an edge of ' + (edge >= 0 ? '+' : '') + edge + '¢ before fees. ' + (edge >= 3 ? 'Possible value.' : 'Not enough edge, skip.');
+    const sideAsk = sideAskOf(p);
+    if (sideAsk != null) {
+      const sp = Math.round(sideAsk * 100), edge = c - sp;
+      $('fair').textContent = 'Right now ' + p.side + ' costs ' + sp + '¢ on Polymarket. Bot fair price is ' + c + '¢, an edge of ' + (edge >= 0 ? '+' : '') + edge + '¢ before fees. ' + (edge >= 3 ? 'Possible value.' : 'Not enough edge, skip.') + ' Check the Polymarket app price before acting.';
+    } else if (p.oddsDone) {
+      $('fair').textContent += ' Live Polymarket price not available.';
     }
   } else {
     setPanel('flat');
@@ -485,25 +497,39 @@ async function signal(W) {
   setSrc('Data: ' + source);
   const cur = pending;
   const odds = await getOdds(W);
-  if (odds !== null && pending === cur) { cur.mkt = odds; showSignal(cur); }
+  cur.mkt = odds;
+  cur.oddsDone = true;
+  if (pending === cur) showSignal(cur);
 }
 
-// Polymarket's displayed Up price for this window's market. Returns null if unavailable (blocked region, not found, network).
+async function fetchJSON(url, ms) {
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; } finally { clearTimeout(to); }
+}
+// What it costs right now to buy one share of one outcome, read from Polymarket's live order book (lowest ask).
+async function liveAsk(tokenId) {
+  const j = await fetchJSON('https://clob.polymarket.com/price?token_id=' + encodeURIComponent(tokenId) + '&side=BUY', 6000);
+  const v = j ? parseFloat(j.price) : NaN;
+  return v > 0 && v < 1 ? v : null;
+}
+// Finds the window's market, then reads live Up and Down prices. Returns {up, down} or null (blocked region, not found, network).
 async function getOdds(W) {
   try {
-    const ctl = new AbortController();
-    const to = setTimeout(() => ctl.abort(), 6000);
-    const r = await fetch('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-' + W, { signal: ctl.signal, cache: 'no-store' });
-    clearTimeout(to);
-    if (!r.ok) return null;
-    const j = await r.json();
+    const j = await fetchJSON('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-' + W, 6000);
     const mk = j && j[0] && j[0].markets && j[0].markets[0];
     if (!mk) return null;
     const outs = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : mk.outcomes;
-    const pr = typeof mk.outcomePrices === 'string' ? JSON.parse(mk.outcomePrices) : mk.outcomePrices;
-    const i = outs.findIndex(o => String(o).toLowerCase() === 'up');
-    const v = parseFloat(pr[i]);
-    return v > 0 && v < 1 ? v : null;
+    const ids = typeof mk.clobTokenIds === 'string' ? JSON.parse(mk.clobTokenIds) : mk.clobTokenIds;
+    const iu = outs.findIndex(o => String(o).toLowerCase() === 'up');
+    const id = outs.findIndex(o => String(o).toLowerCase() === 'down');
+    if (iu < 0 || id < 0 || !ids || !ids[iu] || !ids[id]) return null;
+    const [up, down] = await Promise.all([liveAsk(ids[iu]), liveAsk(ids[id])]);
+    return (up === null && down === null) ? null : { up: up, down: down };
   } catch (e) { return null; }
 }
 
@@ -520,7 +546,7 @@ async function resolve() {
   const correct = (p.p >= 0.5) === (y === 1);
   model.update(p.x, y);
   model.record(correct, p.called);
-  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct, price: p.mkt == null ? null : (p.side === 'UP' ? p.mkt : 1 - p.mkt) });
+  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct, price: sideAskOf(p) });
   showResult(p, y, correct);
   pending = null;
   save();
