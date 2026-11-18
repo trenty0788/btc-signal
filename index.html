@@ -160,6 +160,7 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
     <h2>Versus Polymarket prices</h2>
     <p class="note" id="evalNote"></p>
     <div class="scroll"><table class="tbl" id="evalTbl"></table></div>
+    <p class="note" id="closeNote"></p>
   </section>
 
   <section class="card">
@@ -398,15 +399,28 @@ function evaluate(rows, thr, fee) {
   return { n: n, w: w, avg: n ? sum / n : null };
 }
 
+// Windows where Coinbase moved less than this many dollars are "close calls": Polymarket settles on a different
+// price source, so it can disagree with Coinbase on them.
+const CLOSE_USD = 25;
+const isClose = r => typeof r.mv === 'number' && Math.abs(r.mv) < CLOSE_USD;
+
+// Of the bets a minimum edge rule would make: how many were close calls, and how the rest did.
+function splitClose(rows, thr, fee) {
+  const bets = rows.filter(r => { const b = bestSide(r.p, r.upAsk, r.dnAsk, fee); return b && b.net >= thr - 1e-9; });
+  const known = bets.filter(r => typeof r.mv === 'number');
+  const decisive = known.filter(r => !isClose(r));
+  return { bets: bets.length, known: known.length, close: known.length - decisive.length, decisive: evaluate(decisive, thr, fee) };
+}
+
 function toCSV(rows) {
   const head = ['window_start_utc', 'signal_minute', 'bot_p_up', 'lean', 'polymarket_up_ask', 'polymarket_down_ask',
                 'bet', 'basis', 'net_edge', 'outcome', 'bet_result', 'book_imbalance_wide', 'book_imbalance_near',
-                'window_open', 'price_at_signal'];
+                'window_open', 'price_at_signal', 'coinbase_move_usd', 'close_call'];
   const f = v => (v === null || v === undefined) ? '' : String(v);
   const lines = [head.join(',')];
   for (const r of rows) {
     lines.push([new Date(r.W * 1000).toISOString(), r.m, r.p, r.lean, r.upAsk, r.dnAsk, r.bet, r.basis, r.net, r.outcome,
-                r.bet ? (r.bet === r.outcome ? 'win' : 'loss') : '', r.imbW, r.imbN, r.open, r.cur].map(f).join(','));
+                r.bet ? (r.bet === r.outcome ? 'win' : 'loss') : '', r.imbW, r.imbN, r.open, r.cur, r.mv, typeof r.mv === 'number' ? (isClose(r) ? 'yes' : 'no') : ''].map(f).join(','));
   }
   return lines.join('\n');
 }
@@ -614,7 +628,7 @@ function renderLog() {
     const a = document.createElement('span');
     a.textContent = tl(r.W);
     const b = document.createElement('span');
-    b.textContent = (r.bet ? 'Bet ' + r.bet : 'Skip') + ' → ' + r.outcome;
+    b.textContent = (r.bet ? 'Bet ' + r.bet : 'Skip') + ' → ' + r.outcome + (isClose(r) ? ' · close' : '');
     const pill = document.createElement('span');
     const win = r.bet && r.bet === r.outcome;
     pill.className = 'pill' + (r.bet ? (win ? ' win' : ' loss') : '');
@@ -646,6 +660,16 @@ function renderEval() {
     const e = evaluate(rows, thr, cfg.fee);
     addRow(t, ['+' + Math.round(thr * 100) + '¢', String(e.n), e.n ? Math.round(e.w / e.n * 100) + '%' : '—',
                e.avg === null ? '—' : (e.avg >= 0 ? '+' : '') + (e.avg * 100).toFixed(1) + '¢']);
+  }
+  const s = splitClose(rows, cfg.edge, cfg.fee);
+  if (!s.bets) {
+    $('closeNote').textContent = '';
+  } else if (!s.known) {
+    $('closeNote').textContent = 'Close-call tracking starts with new windows. Older ones were saved without the move size.';
+  } else {
+    const d = s.decisive;
+    $('closeNote').textContent = 'At your ' + cents(cfg.edge) + ' minimum edge: ' + s.close + ' of ' + s.known + ' bets were close calls (Coinbase moved under $' + CLOSE_USD + '), where Polymarket may have settled differently. '
+      + (d.n ? 'Without them: ' + d.n + ' bets, ' + Math.round(d.w / d.n * 100) + '% won, ' + (d.avg >= 0 ? '+' : '') + (d.avg * 100).toFixed(1) + '¢ per bet.' : 'No bets are left without them yet.');
   }
 }
 function renderCal() {
@@ -736,7 +760,7 @@ async function resolve() {
     upAsk: p.mkt ? p.mkt.up : null, dnAsk: p.mkt ? p.mkt.down : null,
     bet: p.bet, basis: p.basis, net: p.best ? +p.best.net.toFixed(4) : null, outcome: outcome,
     imbW: p.imb ? +p.imb[0].toFixed(4) : null, imbN: p.imb ? +p.imb[1].toFixed(4) : null,
-    open: p.open, cur: p.cur
+    open: p.open, cur: p.cur, mv: +(c.get(p.W + 240)[3] - c.get(p.W)[0]).toFixed(2)
   });
   if (log.length > LOG_MAX) log = log.slice(-LOG_MAX);
   showResult(p, outcome);
