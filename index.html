@@ -1,5 +1,13 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}</style>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}
+.scroll { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tbl th, .tbl td { padding: 7px 6px; text-align: right; border-top: 1px solid var(--line); white-space: nowrap; }
+.tbl th { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); border-top: 0; }
+.tbl th:first-child, .tbl td:first-child { text-align: left; }
+.card .row .btn { min-height: 44px; font-size: 14px; flex: 1 1 auto; }
+.card > .note { margin-bottom: 8px; }
+</style>
 <title>BTC 5-Min Signal</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -148,7 +156,17 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
     <div class="stat"><span class="k">Learned</span><span class="big" id="sN">0</span><span class="sub">windows</span></div>
   </section>
 
-  <p class="note" id="pnl"></p>
+  <section class="card">
+    <h2>Versus Polymarket prices</h2>
+    <p class="note" id="evalNote"></p>
+    <div class="scroll"><table class="tbl" id="evalTbl"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Calibration</h2>
+    <p class="note" id="calNote"></p>
+    <div class="scroll"><table class="tbl" id="calTbl"></table></div>
+  </section>
 
   <section class="card">
     <h2>Recent windows</h2>
@@ -167,7 +185,25 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
       </select>
     </div>
     <div class="row">
-      <label for="selConf">Only call a side at</label>
+      <label for="selEdge">Minimum edge after fees</label>
+      <select id="selEdge">
+        <option value="0">0¢</option>
+        <option value="0.02" selected>2¢</option>
+        <option value="0.04">4¢</option>
+        <option value="0.06">6¢</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="selFee">Fee allowance per share</label>
+      <select id="selFee">
+        <option value="0">0¢</option>
+        <option value="0.01">1¢</option>
+        <option value="0.02" selected>2¢</option>
+        <option value="0.03">3¢</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="selConf">Confidence needed if no price</label>
       <select id="selConf">
         <option value="0.52">52% or more</option>
         <option value="0.55" selected>55% or more</option>
@@ -184,9 +220,20 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
       </select>
     </div>
     <div class="row">
-      <span class="note" id="btNote">Changing the signal time retrains from recent history.</span>
+      <span class="note" id="btNote">Changing the signal time or history retrains the bot.</span>
       <button class="btn" id="resetBtn" type="button">Reset learning</button>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Your data</h2>
+    <p class="note" id="dataNote"></p>
+    <div class="row">
+      <button class="btn" id="exportBtn" type="button">Export CSV</button>
+      <button class="btn" id="copyBtn" type="button">Copy CSV</button>
+      <button class="btn" id="clearBtn" type="button">Clear log</button>
+    </div>
+    <p class="note" id="dataMsg" aria-live="polite"></p>
   </section>
 
   <p class="note" id="wakeNote">Keep this page open and the screen on. Locking the phone pauses the bot, and it catches up when you return. Signals are advice only and no trades are placed. Not financial advice.</p>
@@ -194,12 +241,14 @@ select { font: inherit; background: var(--bg); color: var(--fg); border: 1px sol
 
 <script>
 // ==CORE==
-const WINDOW = 300, NFEAT = 9, LR = 0.01, L2 = 1e-3;
+const WINDOW = 300, EXTRA = 2, NFEAT = 9 + EXTRA, LR = 0.01, L2 = 1e-3;
+const CAL_EDGES = [0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.9, 1.01];
 const clip = (v, l) => Math.max(-l, Math.min(l, v));
 const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
 const std = a => { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) * (v - m), 0) / a.length); };
 
 // c: Map of minute-start (unix seconds) -> [open, high, low, close, volume]
+// Returns the 9 price-based inputs. Order book inputs are appended by the caller.
 function features(c, W, m) {
   const tEnd = W + m * 60;
   if (!c.has(W)) return null;
@@ -233,10 +282,34 @@ function features(c, W, m) {
           clip(volRatio, 3), clip(volSurge, 3), green, Math.sin(h), Math.cos(h)];
 }
 
+// Order book imbalance from Coinbase level-2 data: (bid size - ask size) / total, in [-1, 1].
+// Two depths: within 0.1% of the mid price, and within 0.02%. Returns null if the book is unusable.
+function bookImbalance(book) {
+  try {
+    const bids = book.bids.map(r => [+r[0], +r[1]]), asks = book.asks.map(r => [+r[0], +r[1]]);
+    if (!bids.length || !asks.length) return null;
+    const bb = Math.max.apply(null, bids.map(r => r[0])), ba = Math.min.apply(null, asks.map(r => r[0]));
+    const mid = (bb + ba) / 2;
+    if (!(mid > 0) || ba < bb) return null;
+    const at = frac => {
+      let b = 0, a = 0;
+      for (const r of bids) if (r[0] >= mid * (1 - frac)) b += r[1];
+      for (const r of asks) if (r[0] <= mid * (1 + frac)) a += r[1];
+      return (a + b) > 0 ? (b - a) / (b + a) : 0;
+    };
+    return [at(0.001), at(0.0002)];
+  } catch (e) { return null; }
+}
+
 // 1 if the window closed at or above its open (Polymarket "Up"), 0 if below, null if data is missing
 function label(c, W) {
   if (!c.has(W) || !c.has(W + 240)) return null;
   return c.get(W + 240)[3] >= c.get(W)[0] ? 1 : 0;
+}
+
+function calBin(conf) {
+  for (let i = 0; i < CAL_EDGES.length - 1; i++) if (conf < CAL_EDGES[i + 1]) return i;
+  return CAL_EDGES.length - 2;
 }
 
 class Model {
@@ -246,6 +319,7 @@ class Model {
     this.b = 0;
     this.n = 0;
     this.hist = [];
+    this.calib = CAL_EDGES.slice(1).map(() => [0, 0, 0]);   // per confidence band: windows, sum of confidence, wins
     this.backfilled = false;
   }
   predict(x) {
@@ -264,6 +338,10 @@ class Model {
     this.hist.push([correct ? 1 : 0, called ? 1 : 0]);
     if (this.hist.length > 1000) this.hist = this.hist.slice(-1000);
   }
+  addCalib(conf, correct) {
+    const r = this.calib[calBin(conf)];
+    r[0]++; r[1] += conf; r[2] += correct ? 1 : 0;
+  }
 }
 
 function stats(hist, last) {
@@ -274,17 +352,63 @@ function stats(hist, last) {
   return { acc, nCalled: cl.length, accCalled: cl.length ? cl.reduce((s, r) => s + r[0], 0) / cl.length : null };
 }
 
+// Overall claimed confidence versus actual hit rate across all bands.
+function calSummary(calib) {
+  let n = 0, said = 0, wins = 0;
+  for (const r of calib) { n += r[0]; said += r[1]; wins += r[2]; }
+  return n ? { n: n, said: said / n, actual: wins / n } : null;
+}
+
 // Predict each past window before learning from it, so the score is honest.
+// Order book inputs are not available for history, so they stay at 0 there and are learned live.
 function walkForward(model, c, start, end, m, minConf) {
   const out = [];
   for (let W = start; W < end; W += WINDOW) {
-    const x = features(c, W, m), y = label(c, W);
-    if (!x || y === null) continue;
-    const p = model.predict(x), conf = Math.max(p, 1 - p);
-    out.push([((p >= 0.5) === (y === 1)) ? 1 : 0, conf >= minConf ? 1 : 0]);
+    const x0 = features(c, W, m), y = label(c, W);
+    if (!x0 || y === null) continue;
+    const x = x0.concat(new Array(EXTRA).fill(0));
+    const p = model.predict(x), conf = Math.max(p, 1 - p), correct = (p >= 0.5) === (y === 1);
+    out.push([correct ? 1 : 0, conf >= minConf ? 1 : 0]);
+    model.addCalib(conf, correct);
     model.update(x, y);
   }
   return out;
+}
+
+// Edge on the side the bot leans toward: its probability minus the price to buy it minus a fee allowance.
+// It never bets against its own lean, because a cheap long shot against a confident market is usually the bot being wrong.
+function bestSide(pUp, up, dn, fee) {
+  const side = pUp >= 0.5 ? 'UP' : 'DOWN';
+  const prob = side === 'UP' ? pUp : 1 - pUp;
+  const ask = side === 'UP' ? up : dn;
+  if (typeof ask !== 'number') return null;
+  return { side: side, prob: prob, ask: ask, net: prob - ask - fee };
+}
+
+// Replays logged windows: what a minimum edge rule would have bet and earned per share (fee included).
+function evaluate(rows, thr, fee) {
+  let n = 0, w = 0, sum = 0;
+  for (const r of rows) {
+    const b = bestSide(r.p, r.upAsk, r.dnAsk, fee);
+    if (!b || b.net < thr - 1e-9) continue;
+    const win = r.outcome === b.side;
+    n++; if (win) w++;
+    sum += (win ? 1 - b.ask : -b.ask) - fee;
+  }
+  return { n: n, w: w, avg: n ? sum / n : null };
+}
+
+function toCSV(rows) {
+  const head = ['window_start_utc', 'signal_minute', 'bot_p_up', 'lean', 'polymarket_up_ask', 'polymarket_down_ask',
+                'bet', 'basis', 'net_edge', 'outcome', 'bet_result', 'book_imbalance_wide', 'book_imbalance_near',
+                'window_open', 'price_at_signal'];
+  const f = v => (v === null || v === undefined) ? '' : String(v);
+  const lines = [head.join(',')];
+  for (const r of rows) {
+    lines.push([new Date(r.W * 1000).toISOString(), r.m, r.p, r.lean, r.upAsk, r.dnAsk, r.bet, r.basis, r.net, r.outcome,
+                r.bet ? (r.bet === r.outcome ? 'win' : 'loss') : '', r.imbW, r.imbN, r.open, r.cur].map(f).join(','));
+  }
+  return lines.join('\n');
 }
 // ==/CORE==
 
@@ -335,33 +459,72 @@ async function getCandles(start, end, onProg) {
     return c;
   }
 }
+async function fetchJSON(url, ms) {
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; } finally { clearTimeout(to); }
+}
+// Coinbase order book snapshot, reduced to two imbalance numbers. Null if it cannot be read.
+async function getBook() {
+  const j = await fetchJSON('https://api.exchange.coinbase.com/products/BTC-USD/book?level=2', 8000);
+  return j ? bookImbalance(j) : null;
+}
+// What it costs right now to buy one share of one outcome, read from Polymarket's live order book (lowest ask).
+async function liveAsk(tokenId) {
+  const j = await fetchJSON('https://clob.polymarket.com/price?token_id=' + encodeURIComponent(tokenId) + '&side=BUY', 6000);
+  const v = j ? parseFloat(j.price) : NaN;
+  return v > 0 && v < 1 ? v : null;
+}
+// Finds the window's market, then reads live Up and Down prices. Returns {up, down} or null (blocked region, not found, network).
+async function getOdds(W) {
+  try {
+    const j = await fetchJSON('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-' + W, 6000);
+    const mk = j && j[0] && j[0].markets && j[0].markets[0];
+    if (!mk) return null;
+    const outs = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : mk.outcomes;
+    const ids = typeof mk.clobTokenIds === 'string' ? JSON.parse(mk.clobTokenIds) : mk.clobTokenIds;
+    const iu = outs.findIndex(o => String(o).toLowerCase() === 'up');
+    const id = outs.findIndex(o => String(o).toLowerCase() === 'down');
+    if (iu < 0 || id < 0 || !ids || !ids[iu] || !ids[id]) return null;
+    const [up, down] = await Promise.all([liveAsk(ids[iu]), liveAsk(ids[id])]);
+    return (up === null && down === null) ? null : { up: up, down: down };
+  } catch (e) { return null; }
+}
 
 // ---------- state ----------
 const $ = id => document.getElementById(id);
 const LS = 'btc5sig.v1';
-let cfg = { m: 2, minConf: 0.55, days: 3 };
-let model = null, recent = [], pending = null, running = false, busy = false;
-let lastSigW = 0, sigRetryAt = 0, wake = null, timer = null, resetArm = 0;
+const LOG_MAX = 4000;
+let cfg = { m: 2, minConf: 0.55, days: 3, edge: 0.02, fee: 0.02 };
+let model = null, log = [], pending = null, running = false, busy = false;
+let lastSigW = 0, sigRetryAt = 0, wake = null, timer = null;
 
 function loadSaved() {
   try {
     const d = JSON.parse(localStorage.getItem(LS) || 'null');
     if (!d) return;
     if (d.cfg) cfg = Object.assign(cfg, d.cfg);
-    recent = Array.isArray(d.recent) ? d.recent : [];
-    // Prices saved by the earlier version came from a stale feed, so drop them.
-    if (d.oddsV !== 2) recent.forEach(r => { r.price = null; });
-    if (d.model && d.model.minute === cfg.m && d.model.w && d.model.w.length === NFEAT) {
+    if (d.v === 3 && Array.isArray(d.log)) log = d.log;
+    if (d.model && d.model.minute === cfg.m && d.model.w && d.model.w.length === NFEAT && Array.isArray(d.model.calib)) {
       model = Object.assign(new Model(cfg.m), d.model);
     }
   } catch (e) { /* storage unavailable: start fresh */ }
 }
 function save() {
-  try { localStorage.setItem(LS, JSON.stringify({ oddsV: 2, cfg: cfg, recent: recent.slice(-30), model: model })); } catch (e) { /* ignore */ }
+  const attempt = n => localStorage.setItem(LS, JSON.stringify({ v: 3, cfg: cfg, log: log.slice(-n), model: model }));
+  try { attempt(LOG_MAX); } catch (e) {
+    try { attempt(1000); } catch (e2) { /* storage full or unavailable */ }
+  }
 }
 
 // ---------- display ----------
 const pct = v => v === null ? '—' : (v * 100).toFixed(0) + '%';
+const cents = v => Math.round(v * 100) + '¢';
+const askText = v => typeof v === 'number' ? cents(v) : 'n/a';
 const money = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const tl = W => new Date(W * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const mmss = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
@@ -369,11 +532,13 @@ const mmss = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + '
 function setPanel(cls) { $('panel').className = 'panel ' + cls; }
 function setSrc(t) { $('src').textContent = t; }
 
-// Price you would pay now for the side the bot called, or null if unknown.
-function sideAskOf(p) {
-  if (!p.mkt) return null;
-  const v = p.side === 'UP' ? p.mkt.up : p.mkt.down;
-  return typeof v === 'number' ? v : null;
+// After the live Polymarket prices arrive, decide by edge instead of by confidence alone.
+function applyEdgeRule(p) {
+  const b = bestSide(p.p, p.mkt.up, p.mkt.down, cfg.fee);
+  if (!b) return;
+  p.best = b;
+  p.basis = 'edge';
+  p.bet = b.net >= cfg.edge - 1e-9 ? b.side : null;
 }
 
 function showSignal(p) {
@@ -384,29 +549,33 @@ function showSignal(p) {
   $('pChg').textContent = (chg >= 0 ? '+' : '') + chg.toFixed(3) + '%';
   $('res').textContent = '';
   const c = Math.round(p.conf * 100);
-  if (p.called) {
-    setPanel(p.side === 'UP' ? 'up' : 'down');
-    $('sig').textContent = (p.side === 'UP' ? '▲ ' : '▼ ') + p.side;
-    $('conf').textContent = 'Confidence ' + c + '%';
-    $('fair').textContent = 'Fair price for ' + p.side + ' is ' + c + '¢. Only worth taking if Polymarket sells ' + p.side + ' for clearly less, after fees.';
-    const sideAsk = sideAskOf(p);
-    if (sideAsk != null) {
-      const sp = Math.round(sideAsk * 100), edge = c - sp;
-      $('fair').textContent = 'Right now ' + p.side + ' costs ' + sp + '¢ on Polymarket. Bot fair price is ' + c + '¢, an edge of ' + (edge >= 0 ? '+' : '') + edge + '¢ before fees. ' + (edge >= 3 ? 'Possible value.' : 'Not enough edge, skip.') + ' Check the Polymarket app price before acting.';
-    } else if (p.oddsDone) {
-      $('fair').textContent += ' Live Polymarket price not available.';
+  const wait = p.oddsDone ? ' Live Polymarket price not available.' : ' Checking the Polymarket price…';
+  if (p.bet) {
+    setPanel(p.bet === 'UP' ? 'up' : 'down');
+    $('sig').textContent = (p.bet === 'UP' ? '▲ ' : '▼ ') + p.bet;
+    if (p.basis === 'edge') {
+      const b = p.best;
+      $('conf').textContent = 'Bot says ' + Math.round(b.prob * 100) + '%, costs ' + cents(b.ask);
+      $('fair').textContent = 'Edge after fees: +' + Math.round(b.net * 100) + '¢ (fee allowance ' + cents(cfg.fee) + '). Check the Polymarket app price before acting.';
+    } else {
+      $('conf').textContent = 'Confidence ' + c + '%';
+      $('fair').textContent = 'Fair price for ' + p.bet + ' is ' + c + '¢.' + wait;
     }
   } else {
     setPanel('flat');
-    $('sig').textContent = 'NO CALL';
-    $('conf').textContent = 'Leans ' + p.side + ' ' + c + '%';
-    $('fair').textContent = 'Too close to 50/50 to call. Skip this window.';
+    $('conf').textContent = 'Leans ' + p.lean + ' ' + c + '%';
+    if (p.basis === 'edge') {
+      $('sig').textContent = 'SKIP';
+      $('fair').textContent = 'No side is cheap enough. UP costs ' + askText(p.mkt.up) + ' and DOWN costs ' + askText(p.mkt.down) + '. Bot fair prices are ' + Math.round(p.p * 100) + '¢ and ' + Math.round((1 - p.p) * 100) + '¢.';
+    } else {
+      $('sig').textContent = 'NO CALL';
+      $('fair').textContent = 'Too close to 50/50 to call.' + (p.oddsDone ? wait : '');
+    }
   }
 }
-function showResult(p, y, correct) {
-  const outcome = y === 1 ? 'UP' : 'DOWN';
-  $('res').textContent = p.called
-    ? 'Result: ' + outcome + ' — ' + (correct ? 'call was right' : 'call was wrong')
+function showResult(p, outcome) {
+  $('res').textContent = p.bet
+    ? 'Result: ' + outcome + ' — ' + (p.bet === outcome ? 'call was right' : 'call was wrong')
     : 'Result: ' + outcome + ' (no call made)';
 }
 function renderCountdown() {
@@ -432,7 +601,7 @@ function renderStats() {
 function renderLog() {
   const ol = $('log');
   ol.textContent = '';
-  const rows = recent.slice(-12).reverse();
+  const rows = log.slice(-12).reverse();
   if (!rows.length) {
     const li = document.createElement('li');
     li.className = 'empty';
@@ -445,22 +614,61 @@ function renderLog() {
     const a = document.createElement('span');
     a.textContent = tl(r.W);
     const b = document.createElement('span');
-    b.textContent = (r.called ? 'Called ' + r.lean : 'No call') + ' → ' + r.outcome;
+    b.textContent = (r.bet ? 'Bet ' + r.bet : 'Skip') + ' → ' + r.outcome;
     const pill = document.createElement('span');
-    pill.className = 'pill' + (r.called ? (r.correct ? ' win' : ' loss') : '');
-    pill.textContent = r.called ? (r.correct ? 'Win' : 'Loss') : '—';
+    const win = r.bet && r.bet === r.outcome;
+    pill.className = 'pill' + (r.bet ? (win ? ' win' : ' loss') : '');
+    pill.textContent = r.bet ? (win ? 'Win' : 'Loss') : '—';
     li.append(a, b, pill);
     ol.appendChild(li);
   }
 }
-function renderPnl() {
-  const rows = recent.filter(r => r.called && r.price != null);
-  const el = $('pnl');
-  if (!rows.length) { el.textContent = 'Polymarket odds not recorded yet. Once they load, this shows what the calls would have earned at those prices.'; return; }
-  const cents = rows.reduce((s, r) => s + (r.correct ? 1 - r.price : -r.price), 0) * 100;
-  el.textContent = 'At Polymarket’s prices, buying 1 share on each of the last ' + rows.length + ' calls would have made ' + (cents >= 0 ? '+' : '') + cents.toFixed(0) + '¢ before fees. Small samples swing a lot.';
+function addRow(table, cells, head) {
+  const tr = document.createElement('tr');
+  for (const v of cells) {
+    const td = document.createElement(head ? 'th' : 'td');
+    td.textContent = v;
+    tr.appendChild(td);
+  }
+  table.appendChild(tr);
 }
-function render() { renderStats(); renderLog(); renderPnl(); renderCountdown(); }
+function renderEval() {
+  const rows = log.filter(r => r.upAsk != null || r.dnAsk != null);
+  const t = $('evalTbl');
+  t.textContent = '';
+  if (rows.length < 30) {
+    $('evalNote').textContent = 'Only ' + rows.length + ' windows have a Polymarket price so far. Leave the bot running for a few hundred windows before trusting any number here.';
+  } else {
+    $('evalNote').textContent = rows.length + ' windows with prices. Each row replays them with a minimum edge, after a ' + cents(cfg.fee) + ' fee allowance per share. Even a few hundred windows can be luck.';
+  }
+  addRow(t, ['Min edge', 'Bets', 'Win rate', 'Avg per bet'], true);
+  for (const thr of [0, 0.02, 0.04, 0.06, 0.08]) {
+    const e = evaluate(rows, thr, cfg.fee);
+    addRow(t, ['+' + Math.round(thr * 100) + '¢', String(e.n), e.n ? Math.round(e.w / e.n * 100) + '%' : '—',
+               e.avg === null ? '—' : (e.avg >= 0 ? '+' : '') + (e.avg * 100).toFixed(1) + '¢']);
+  }
+}
+function renderCal() {
+  const t = $('calTbl');
+  t.textContent = '';
+  if (!model) { $('calNote').textContent = 'Appears after the bot has learned from history.'; return; }
+  const s = calSummary(model.calib);
+  $('calNote').textContent = s
+    ? 'Across ' + s.n + ' windows the bot claimed ' + pct(s.said) + ' on average and was right ' + pct(s.actual) + '. When it claims more than it delivers, trust its percentages less.'
+    : 'Appears after the bot has learned from history.';
+  addRow(t, ['Bot said', 'Windows', 'Avg said', 'Right'], true);
+  for (let i = 0; i < model.calib.length; i++) {
+    const r = model.calib[i];
+    const lo = Math.round(CAL_EDGES[i] * 100), hi = Math.min(100, Math.round(CAL_EDGES[i + 1] * 100));
+    addRow(t, [lo + (i === model.calib.length - 1 ? '%+' : '–' + hi + '%'), String(r[0]), r[0] ? pct(r[1] / r[0]) : '—', r[0] ? pct(r[2] / r[0]) : '—']);
+  }
+}
+function renderData() {
+  $('dataNote').textContent = log.length
+    ? log.length + ' windows saved on this phone, each with the bot’s probability, Polymarket prices and the result.'
+    : 'Every finished window is saved here so you can export it and check the bot’s record.';
+}
+function render() { renderStats(); renderEval(); renderCal(); renderLog(); renderData(); renderCountdown(); }
 function showErr(t) { const e = $('err'); e.textContent = t || ''; e.hidden = !t; }
 function setProgress(f) { $('barFill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; }
 
@@ -477,60 +685,35 @@ async function backfill(days) {
   $('loadBox').hidden = true;
   const st = stats(hist);
   $('btNote').textContent = hist.length
-    ? 'Tested on ' + hist.length + ' past windows: ' + pct(st.acc) + ' right overall, ' + pct(st.accCalled) + ' on confident calls. Past accuracy is not a profit guarantee.'
+    ? 'Tested on ' + hist.length + ' past windows: ' + pct(st.acc) + ' right overall, ' + pct(st.accCalled) + ' on confident calls. Order book inputs are learned live only. Past accuracy is not a profit guarantee.'
     : 'Not enough history was available to test.';
   save();
 }
 
 async function signal(W) {
   const now = Date.now() / 1000;
+  const bookP = getBook();
+  const oddsP = getOdds(W);
   const c = await getCandles(W - 3700, W + cfg.m * 60);
-  const x = features(c, W, cfg.m);
-  if (!x) { sigRetryAt = now + 6; return; }
-  const p = model.predict(x), conf = Math.max(p, 1 - p);
+  const x0 = features(c, W, cfg.m);
+  if (!x0) { sigRetryAt = now + 6; return; }
+  const imb = await bookP;
+  const x = x0.concat(imb ? [clip(imb[0] * 2, 2), clip(imb[1] * 2, 2)] : [0, 0]);
+  const p = model.predict(x), conf = Math.max(p, 1 - p), lean = p >= 0.5 ? 'UP' : 'DOWN';
+  const calledConf = conf >= cfg.minConf;
   pending = {
-    W: W, x: x, p: p, conf: conf, side: p >= 0.5 ? 'UP' : 'DOWN', called: conf >= cfg.minConf,
-    open: c.get(W)[0], cur: c.get(W + cfg.m * 60 - 60)[3], next: 0, tries: 0, mkt: null
+    W: W, x: x, p: p, conf: conf, lean: lean, calledConf: calledConf, bet: calledConf ? lean : null, basis: 'conf',
+    open: c.get(W)[0], cur: c.get(W + cfg.m * 60 - 60)[3], imb: imb, next: 0, tries: 0, mkt: null, best: null, oddsDone: false
   };
   lastSigW = W;
   showSignal(pending);
   setSrc('Data: ' + source);
   const cur = pending;
-  const odds = await getOdds(W);
+  const odds = await oddsP;
   cur.mkt = odds;
   cur.oddsDone = true;
+  if (odds) applyEdgeRule(cur);
   if (pending === cur) showSignal(cur);
-}
-
-async function fetchJSON(url, ms) {
-  const ctl = new AbortController();
-  const to = setTimeout(() => ctl.abort(), ms);
-  try {
-    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch (e) { return null; } finally { clearTimeout(to); }
-}
-// What it costs right now to buy one share of one outcome, read from Polymarket's live order book (lowest ask).
-async function liveAsk(tokenId) {
-  const j = await fetchJSON('https://clob.polymarket.com/price?token_id=' + encodeURIComponent(tokenId) + '&side=BUY', 6000);
-  const v = j ? parseFloat(j.price) : NaN;
-  return v > 0 && v < 1 ? v : null;
-}
-// Finds the window's market, then reads live Up and Down prices. Returns {up, down} or null (blocked region, not found, network).
-async function getOdds(W) {
-  try {
-    const j = await fetchJSON('https://gamma-api.polymarket.com/events?slug=btc-updown-5m-' + W, 6000);
-    const mk = j && j[0] && j[0].markets && j[0].markets[0];
-    if (!mk) return null;
-    const outs = typeof mk.outcomes === 'string' ? JSON.parse(mk.outcomes) : mk.outcomes;
-    const ids = typeof mk.clobTokenIds === 'string' ? JSON.parse(mk.clobTokenIds) : mk.clobTokenIds;
-    const iu = outs.findIndex(o => String(o).toLowerCase() === 'up');
-    const id = outs.findIndex(o => String(o).toLowerCase() === 'down');
-    if (iu < 0 || id < 0 || !ids || !ids[iu] || !ids[id]) return null;
-    const [up, down] = await Promise.all([liveAsk(ids[iu]), liveAsk(ids[id])]);
-    return (up === null && down === null) ? null : { up: up, down: down };
-  } catch (e) { return null; }
 }
 
 async function resolve() {
@@ -543,11 +726,20 @@ async function resolve() {
     p.next = Date.now() / 1000 + 5;
     return;
   }
-  const correct = (p.p >= 0.5) === (y === 1);
+  const outcome = y === 1 ? 'UP' : 'DOWN';
+  const correct = p.lean === outcome;
   model.update(p.x, y);
-  model.record(correct, p.called);
-  recent.push({ W: p.W, called: p.called, lean: p.side, conf: p.conf, outcome: y === 1 ? 'UP' : 'DOWN', correct: correct, price: sideAskOf(p) });
-  showResult(p, y, correct);
+  model.record(correct, p.calledConf);
+  model.addCalib(p.conf, correct);
+  log.push({
+    W: p.W, m: cfg.m, p: +p.p.toFixed(4), lean: p.lean,
+    upAsk: p.mkt ? p.mkt.up : null, dnAsk: p.mkt ? p.mkt.down : null,
+    bet: p.bet, basis: p.basis, net: p.best ? +p.best.net.toFixed(4) : null, outcome: outcome,
+    imbW: p.imb ? +p.imb[0].toFixed(4) : null, imbN: p.imb ? +p.imb[1].toFixed(4) : null,
+    open: p.open, cur: p.cur
+  });
+  if (log.length > LOG_MAX) log = log.slice(-LOG_MAX);
+  showResult(p, outcome);
   pending = null;
   save();
   render();
@@ -635,29 +827,57 @@ async function relearn() {
   }
 }
 
+// A button that needs a second tap within 4 seconds to run its action.
+function confirmButton(btn, label, action) {
+  let armed = 0;
+  btn.addEventListener('click', () => {
+    if (Date.now() < armed) { armed = 0; btn.textContent = label; action(); return; }
+    armed = Date.now() + 4000;
+    btn.textContent = 'Tap again to confirm';
+    setTimeout(() => { if (Date.now() >= armed) { armed = 0; btn.textContent = label; } }, 4100);
+  });
+}
+function dataMsg(t) { $('dataMsg').textContent = t; }
+function exportCSV() {
+  if (!log.length) { dataMsg('Nothing to export yet. Let a few windows finish first.'); return; }
+  try {
+    const blob = new Blob([toCSV(log)], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'btc-signal-log.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    dataMsg('Export started. If nothing downloaded, use Copy CSV instead.');
+  } catch (e) { dataMsg('Could not start the download. Use Copy CSV instead.'); }
+}
+function copyCSV() {
+  if (!log.length) { dataMsg('Nothing to copy yet. Let a few windows finish first.'); return; }
+  const text = toCSV(log);
+  const ok = () => dataMsg('Copied ' + log.length + ' rows. Paste them into Notes or a spreadsheet.');
+  const no = () => dataMsg('Copying was blocked on this device. Try Export CSV.');
+  try { navigator.clipboard.writeText(text).then(ok, no); } catch (e) { no(); }
+}
+
 $('startBtn').addEventListener('click', start);
 $('selMin').addEventListener('change', e => { cfg.m = +e.target.value; save(); relearn(); });
 $('selConf').addEventListener('change', e => { cfg.minConf = +e.target.value; save(); });
 $('selDays').addEventListener('change', e => { cfg.days = +e.target.value; save(); relearn(); });
-$('resetBtn').addEventListener('click', () => {
-  const btn = $('resetBtn');
-  if (Date.now() < resetArm) {
-    resetArm = 0;
-    btn.textContent = 'Reset learning';
-    recent = [];
-    relearn();
-    return;
-  }
-  resetArm = Date.now() + 4000;
-  btn.textContent = 'Tap again to confirm';
-  setTimeout(() => { if (Date.now() >= resetArm) { resetArm = 0; btn.textContent = 'Reset learning'; } }, 4100);
-});
+$('selEdge').addEventListener('change', e => { cfg.edge = +e.target.value; save(); render(); });
+$('selFee').addEventListener('change', e => { cfg.fee = +e.target.value; save(); render(); });
+$('exportBtn').addEventListener('click', exportCSV);
+$('copyBtn').addEventListener('click', copyCSV);
+confirmButton($('resetBtn'), 'Reset learning', () => relearn());
+confirmButton($('clearBtn'), 'Clear log', () => { log = []; save(); render(); dataMsg('Log cleared.'); });
 
 loadSaved();
 $('selMin').value = String(cfg.m);
 $('selConf').value = String(cfg.minConf);
 $('selDays').value = String(cfg.days);
-if (model && model.backfilled) $('btNote').textContent = 'Picked up where you left off. Changing the signal time retrains from recent history.';
+$('selEdge').value = String(cfg.edge);
+$('selFee').value = String(cfg.fee);
+if (model && model.backfilled) $('btNote').textContent = 'Picked up where you left off. Changing the signal time or history retrains the bot.';
 render();
 </script>
 
