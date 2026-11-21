@@ -264,7 +264,7 @@ function findOwner() {
 let owner = findOwner();
 
 // ---------- state ----------
-const S = { live: null, lastOk: 0, everOk: false, model: null, book: null, bookAt: 0, conf: null, mark: null, tick: 0, failures: 0 };
+const S = { live: null, lastOk: 0, everOk: false, model: null, book: null, bookAt: 0, conf: null, mark: null, tick: 0, failures: 0, polling: false, waiting: false };
 
 async function fetchJSON(url, ms) {
   const ctl = new AbortController();
@@ -299,10 +299,17 @@ const askOf = L => { const v = L.lean === 'UP' ? L.upAsk : L.dnAsk; return typeo
 // ---------- polling ----------
 async function pollLive() {
   if (!owner) { $('setupCard').hidden = false; render(); return; }
-  const j = await fetchJSON(rawUrl('data/live.json'), 8000);
+  if (S.polling) return;
+  S.polling = true;
+  let j = null;
+  try { j = await fetchJSON(rawUrl('data/live.json'), 8000); } finally { S.polling = false; }
   if (j && typeof j.W === 'number' && j.lean) {
-    if (!S.live || S.live.W !== j.W || S.live.at !== j.at) { S.conf = null; S.mark = null; }
-    S.live = j;
+    // A cached copy can come back older than the call already on screen; never step backwards.
+    const older = S.live && (j.W < S.live.W || (j.W === S.live.W && (j.updated || 0) < (S.live.updated || 0)));
+    if (!older) {
+      if (!S.live || S.live.W !== j.W || S.live.at !== j.at) { S.conf = null; S.mark = null; }
+      S.live = j;
+    }
     S.lastOk = Date.now();
     S.everOk = true;
     S.failures = 0;
@@ -357,8 +364,8 @@ function render() {
   const age = S.lastOk ? (Date.now() - S.lastOk) / 1000 : null;
   const chip = $('chip');
   if (age === null) { chip.className = 'chip'; $('chipText').textContent = 'Connecting'; }
-  else if (age < 30) { chip.className = 'chip ok'; $('chipText').textContent = 'Live · updated ' + Math.round(age) + 's ago'; }
-  else { chip.className = 'chip slow'; $('chipText').textContent = 'Reconnecting · last update ' + Math.round(age) + 's ago'; }
+  else if (age < 30) { chip.className = 'chip ok'; $('chipText').textContent = 'Live · checked ' + Math.round(age) + 's ago'; }
+  else { chip.className = 'chip slow'; $('chipText').textContent = 'Reconnecting · last check ' + Math.round(age) + 's ago'; }
 
   const L = S.live;
   if (!L) { $('bar').hidden = true; return; }
@@ -391,13 +398,21 @@ function render() {
   }
 
   // countdown
+  S.waiting = false;
   if (!ended) {
     $('count').textContent = 'Window ends in ' + mmss(L.W + WINDOW - t);
   } else {
+    // The call for the current window normally reaches this page about (m minutes + 12 s) after the window opens.
+    // If it has not arrived by then, keep waiting for THIS window's call (and poll faster) instead of
+    // jumping ahead to the next window, which made the countdown reset to about 5 minutes.
     const curW = Math.floor(t / WINDOW) * WINDOW;
-    let due = curW + (L.m || 2) * 60 + 12;
-    if (t > due + 30) due = curW + WINDOW + (L.m || 2) * 60 + 12;
-    $('count').textContent = t < due ? 'Next call in ' + mmss(due - t) : 'Next call is due any moment';
+    const due = curW + (L.m || 2) * 60 + 12;
+    if (t < due) {
+      $('count').textContent = 'Next call in ' + mmss(due - t);
+    } else {
+      S.waiting = true;
+      $('count').textContent = 'Call for the ' + hm(curW) + ' window is ' + (t - due < 60 ? 'due, checking now' : 'late, still checking');
+    }
   }
 
   // last finished window
@@ -439,7 +454,7 @@ function render() {
     meter.className = 'meter';
     $('confText').textContent = 'Confidence ' + c + '% at the call' + (ended ? '' : ' · updating');
   }
-  $('leftText').textContent = ended ? 'Window over' : mmss(L.W + WINDOW - t) + ' left';
+  $('leftText').textContent = ended ? (S.waiting ? 'Window over · waiting for the next call' : 'Window over') : mmss(L.W + WINDOW - t) + ' left';
 }
 
 // ---------- start ----------
@@ -459,6 +474,7 @@ keepAwake();
 
 pollLive(); pollModel(); pollBook();
 setInterval(pollLive, 8000);
+setInterval(() => { if (S.waiting) pollLive(); }, 2000);   // poll faster while a call is due but has not arrived
 setInterval(pollModel, 300000);
 setInterval(pollBook, 30000);
 setInterval(() => { refreshPosition(); }, 10000);
